@@ -1,0 +1,7 @@
+{
+  "denied": [
+    ".env",
+    "secrets",
+    "config/prod.key"
+  ]
+}
