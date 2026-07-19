@@ -2880,7 +2880,7 @@ All examples in [examples/extensions/](../examples/extensions/).
 | `reload-runtime.ts` | Reload command and LLM tool handoff | `registerCommand`, `ctx.reload()`, `sendUserMessage` |
 | `shutdown-command.ts` | Graceful shutdown command | `registerCommand`, `shutdown()` |
 | **Events & Gates** |||
-| `permission-gate.ts` | Block dangerous commands | `on("tool_call")`, `block` result |
+| `permission-gate.ts` | Block dangerous commands, confirm the rest | `on("tool_call")`, `block` result, `ctx.ui.confirm` |
 | `project-trust.ts` | Decide or defer project trust from a user/global or CLI extension | `on("project_trust")`, trust UI, required trust result |
 | `protected-paths.ts` | Block writes to specific paths | `on("tool_call")` |
 | `confirm-destructive.ts` | Confirm session changes | `on("session_before_switch")`, `on("session_before_fork")` |
