@@ -131,10 +131,10 @@ const ALLOW_OPTION = "Oui — autoriser";
 
 // Sent to the agent when the user refuses (or dismisses the dialog)
 const REFUSAL_REASON =
-	"L'utilisateur REFUSE cette commande. Il ne souhaite PAS que tu tentes de réaliser " +
-	"cette action d'une autre manière : n'effectue cette action d'aucune façon que ce soit " +
-	"(autre commande, script, outil, ou contournement). Considère-la comme interdite et " +
-	"poursuis la tâche sans elle.";
+	"The user REFUSES this command. They do NOT want you to attempt this action " +
+	"in any other way: do not perform it by any means whatsoever (another command, " +
+	"a script, a tool, or any workaround). Treat it as forbidden and continue the " +
+	"task without it.";
 
 export default function (pi: ExtensionAPI) {
 	pi.on("tool_call", async (event, ctx) => {
@@ -158,8 +158,8 @@ export default function (pi: ExtensionAPI) {
 			return {
 				block: true,
 				reason:
-					"Validation utilisateur requise mais aucune interface n'est disponible " +
-					"(mode non interactif). Commande bloquée par défaut.",
+					"User confirmation is required but no UI is available (non-interactive mode). " +
+					"Command blocked by default.",
 			};
 		}
 
