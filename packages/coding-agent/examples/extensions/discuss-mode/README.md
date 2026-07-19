@@ -88,12 +88,63 @@ Commandes bloquées :
 - Système : `sudo`, `kill`, `reboot`
 - Éditeurs : `vim`, `nano`, `code`
 
-## Vérification des types
+## Problème connu : fausse erreur lors de la vérification des types
 
-Le dossier contient un `tsconfig.json` dédié qui ajoute le mapping du module
-`@earendil-works/pi-agent-core` (absent de `tsconfig.examples.json`) :
+### Le symptôme
 
-```sh
-# depuis packages/coding-agent
-npx tsgo -p examples/extensions/discuss-mode/tsconfig.json
+Si on lance la vérification des types des exemples (`tsgo -p tsconfig.examples.json`
+depuis `packages/coding-agent`), une erreur apparaît sur cette extension :
+
 ```
+error TS2307: Cannot find module '@earendil-works/pi-agent-core'
+```
+
+### Est-ce grave ?
+
+**Non. L'extension fonctionne parfaitement malgré ce message.** Voici pourquoi,
+expliqué simplement :
+
+- TypeScript est le langage dans lequel l'extension est écrite. Avant d'exécuter
+  du code TypeScript, on peut lancer un « vérificateur de types » : un outil qui
+  relit le code et signale les incohérences, un peu comme un correcteur
+  orthographique. Ce vérificateur ne fait que **lire** le code, il ne l'exécute pas.
+- Le projet `pi` est découpé en plusieurs briques (des « packages »). L'extension
+  mentionne l'une de ces briques, `pi-agent-core`, uniquement pour lui emprunter
+  une **description de format de données** (à quoi ressemble un message de l'agent).
+  Cette mention est purement documentaire : elle est complètement supprimée du
+  code réellement exécuté.
+- Le fichier de configuration du vérificateur (`tsconfig.examples.json`, commun à
+  tous les exemples) contient une liste d'adresses : « quand un exemple mentionne
+  telle brique, va lire sa description à tel endroit ». Cette liste mentionne les
+  briques `pi-coding-agent`, `pi-tui` et `pi-ai`... mais **pas** `pi-agent-core`.
+  Le vérificateur ne sait donc pas où lire sa description, et affiche l'erreur.
+- Preuve que ce n'est pas un défaut de cette extension : l'extension officielle
+  `plan-mode`, livrée avec `pi` et parfaitement fonctionnelle, mentionne la même
+  brique et affiche **exactement la même erreur**.
+
+En résumé : c'est l'annuaire du correcteur qui est incomplet, pas le code qui est faux.
+
+### Comment remettre en place le correctif
+
+Ajouter l'adresse manquante dans la liste `paths` du fichier
+`packages/coding-agent/tsconfig.examples.json` :
+
+```json
+"paths": {
+	"@earendil-works/pi-coding-agent": ["./src/index.ts"],
+	"@earendil-works/pi-coding-agent/hooks": ["./src/core/hooks/index.ts"],
+	"@earendil-works/pi-agent-core": ["../agent/src/index.ts"],
+	"@earendil-works/pi-tui": ["../tui/src/index.ts"],
+	"@earendil-works/pi-ai": ["../ai/src/index.ts"],
+	"typebox": ["../../node_modules/typebox"]
+}
+```
+
+La ligne à ajouter est celle de `@earendil-works/pi-agent-core`. Attention :
+ce fichier étant partagé par **tous** les exemples du dossier, cette ligne fera
+aussi disparaître l'erreur pour les autres extensions concernées (`plan-mode`,
+`handoff`, ...). Autre option, sans toucher au fichier partagé : créer un
+`tsconfig.json` local dans ce dossier qui étend `../../../tsconfig.examples.json`
+et redéclare la liste `paths` complète avec la ligne manquante (les chemins
+relatifs doivent alors être ajustés depuis ce dossier, par exemple
+`../../../../agent/src/index.ts`).
