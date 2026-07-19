@@ -11,16 +11,20 @@ développeur peut appliquer à la lettre, sans se poser la moindre question.
 - **Outils d'écriture désactivés** : `edit` et `write` sont retirés pendant la discussion,
   les autres outils actifs sont conservés
 - **Allowlist bash** : seules les commandes en lecture seule sont autorisées
-- **Génération d'une recette** : `/generate-plan` produit un fichier markdown exhaustif
-  (code complet, fichiers à créer/modifier/supprimer, commandes, validations)
-- **Écriture par l'extension** : le fichier est écrit par l'extension elle-même via
-  `node:fs` — l'IA n'a jamais accès à l'outil `write` pendant la discussion
+- **Génération en deux phases** : `/generate-plan` produit d'abord un sommaire des
+  étapes soumis à validation, puis le plan complet (code, fichiers à
+  créer/modifier/supprimer, commandes, validations)
+- **Écriture par l'IA, cantonnée à `plans/`** : le fichier est écrit par l'IA avec
+  l'outil `write`, mais l'extension bloque toute écriture hors du dossier `plans/`
+- **Détection de modification manuelle** : si le fichier de plan est modifié en
+  dehors de la conversation, l'IA en est prévenue au tour suivant
 - **Persistance de session** : l'état survit à une reprise de session
 
 ## Commandes
 
 - `/discuss` — Activer/désactiver le mode discussion
-- `/generate-plan [nom de la fonctionnalité]` — Générer le fichier de plan
+- `/generate-plan [nom de la fonctionnalité]` — Générer le plan (sommaire d'abord)
+- `/modif_plan [nom]` — Modifier un plan existant sans passer par la génération
 - `Ctrl+Alt+D` — Activer/désactiver le mode discussion (raccourci)
 - Flag CLI `--discuss` — Démarrer directement en mode discussion
 
@@ -31,13 +35,37 @@ développeur peut appliquer à la lettre, sans se poser la moindre question.
    pose des questions de clarification, propose des approches et challenge vos choix
 3. Quand la discussion est concluante, lancer `/generate-plan Mon nom de fonctionnalité`
    (sans argument, l'IA déduit le nom de la discussion)
-4. L'extension extrait le document généré et l'écrit dans `plans/<slug>.md`
-   (ex. `plans/authentification-oauth-2-0.md`)
-5. Un choix est ensuite proposé :
+4. **Phase 1 — sommaire** : l'IA affiche uniquement la liste numérotée des étapes
+   prévues (sans code). Un menu propose :
+   - **Generate the full plan** — valider et lancer la génération complète
+   - **Adjust the outline** — saisir des remarques ; l'IA représente un nouveau
+     sommaire, le menu revient
+   - **Cancel** — abandonner, rester en mode discussion
+5. **Phase 2 — génération** : l'IA écrit elle-même le document complet avec l'outil
+   `write` dans `plans/<slug>/<slug>.md` (ex.
+   `plans/authentification-oauth/authentification-oauth.md`) — un seul fichier pour
+   le moment, dans un sous-répertoire par fonctionnalité. L'extension vérifie que le
+   fichier attendu existe bien
+6. Un choix est ensuite proposé :
    - **Execute the plan now** — sortir du mode discussion, restaurer tous les outils
      et demander à l'IA d'appliquer le plan à la lettre
    - **Modify the plan** — passer en mode modification de plan (voir ci-dessous)
    - **Exit discuss mode** — sortir du mode sans exécuter
+
+## Modifier un plan existant : `/modif_plan`
+
+Pour reprendre un plan après avoir quitté `pi`, sans repasser par la discussion ni
+la génération :
+
+- `/modif_plan oauth` — cherche le fichier dans cet ordre : chemin donné tel quel,
+  `plans/oauth`, `plans/oauth.md`, `plans/oauth/oauth.md`, puis les variantes en
+  slug. Introuvable : message d'erreur listant les plans disponibles
+- `/modif_plan` sans argument — affiche un sélecteur listant tous les fichiers
+  `.md` du dossier `plans/`
+
+Dans les deux cas, on entre directement en mode modification de plan, avec les
+mêmes restrictions quel que soit le point d'entrée (écriture limitée à `plans/`,
+bash en lecture seule).
 
 ## Mode modification de plan
 
@@ -53,6 +81,12 @@ Dans ce mode :
 - Bash reste restreint aux commandes en lecture seule
 - L'historique de la conversation est conservé : chaque nouvelle demande de
   modification bénéficie du contexte des échanges précédents
+- L'IA n'est pas obligée de relire le fichier à chaque tour : le contexte injecté
+  lui indique le fichier de travail et lui laisse juger si une relecture est
+  nécessaire avant d'éditer
+- Si le fichier a été modifié **manuellement** (en dehors de la conversation),
+  l'extension le détecte via sa date de modification et ajoute un avertissement
+  au contexte : « relis-le avant toute édition »
 - `/discuss` quitte le mode et restaure tous les outils
 - Pour exécuter le plan une fois les modifications terminées : quitter avec
   `/discuss` puis demander l'exécution, le fichier faisant foi
@@ -82,21 +116,36 @@ Si une information manque, le document est généré quand même avec des blocs
 - Un contexte caché est injecté à chaque tour : co-concevoir la fonctionnalité,
   ne pas générer de plan tant que `/generate-plan` n'a pas été lancé
 
-### Génération
-- `/generate-plan` envoie à l'IA les exigences du document et lui demande de
-  l'encadrer entre les marqueurs `===PLAN-FILE===` et `===END-PLAN-FILE===`
-- À la fin du tour, l'extension extrait le contenu entre les marqueurs,
-  calcule un slug à partir du nom de la fonctionnalité (accents retirés,
-  caractères spéciaux remplacés par des tirets) et écrit `plans/<slug>.md`
+### Génération (deux phases)
+- **Phase 1** : `/generate-plan` demande à l'IA un sommaire seul (titre + étapes
+  numérotées, sans code). À la fin du tour, un menu de validation s'affiche ;
+  « Adjust the outline » ouvre un éditeur pour vos remarques et relance un
+  sommaire
+- **Phase 2** : une fois validé, l'extension calcule le slug (à partir du nom
+  donné en argument ou du titre `#` du sommaire — accents retirés, caractères
+  spéciaux remplacés par des tirets), active les outils d'écriture restreints à
+  `plans/`, et demande à l'IA d'écrire elle-même le document complet dans
+  `plans/<slug>/<slug>.md` avec l'outil `write`
+- À la fin du tour, l'extension vérifie que le fichier attendu existe ; sinon
+  elle signale l'échec et propose de relancer
 
 ### Mode modification de plan
-- Un contexte caché est injecté à chaque tour : le chemin du plan courant,
-  l'obligation de le lire avant modification, et la règle « écriture uniquement
-  dans `plans/` »
+- Un contexte caché est injecté à chaque tour : « Nous travaillons sur la
+  modification du plan : `plans/<slug>/<slug>.md`. Tu n'as pas besoin de le
+  relire à chaque tour ; relis une section seulement si tu as un doute sur son
+  contenu exact avant de l'éditer. »
 - Le hook `tool_call` valide chaque appel `edit`/`write` : le chemin cible est
   résolu en absolu, son dossier parent et le fichier lui-même sont canonisés
   (liens symboliques suivis), et l'appel est bloqué si le résultat sort de
   `plans/`
+
+### Détection de modification manuelle
+- Après chaque tour où l'IA a pu écrire le plan, l'extension mémorise la date de
+  modification (`mtime`) du fichier
+- Avant chaque tour en mode modification, elle compare la date actuelle à celle
+  mémorisée : si elles diffèrent, le fichier a été modifié en dehors de la
+  conversation (éditeur, autre outil...) et une ligne d'avertissement est
+  ajoutée au contexte injecté pour demander une relecture avant édition
 
 ### Allowlist de commandes
 

@@ -100,10 +100,6 @@ export function isSafeCommand(command: string): boolean {
 	return !isDestructive && isSafe;
 }
 
-/** Markers the model must wrap the plan document with. */
-export const PLAN_START_MARKER = "===PLAN-FILE===";
-export const PLAN_END_MARKER = "===END-PLAN-FILE===";
-
 /**
  * Convert a feature name into a filesystem-friendly slug.
  * "Authentification OAuth 2.0" -> "authentification-oauth-2-0"
@@ -119,34 +115,14 @@ export function slugify(name: string): string {
 		.replace(/-+$/g, "");
 }
 
-export interface PlanDocument {
-	/** Full markdown content between the markers. */
-	content: string;
-	/** Feature title taken from the first level-1 heading, if any. */
-	title?: string;
-}
-
 /**
- * Extract the plan document from an assistant message.
- * The document is expected between PLAN_START_MARKER and PLAN_END_MARKER.
- * A missing end marker falls back to end-of-message.
+ * Extract the feature title from the first level-1 markdown heading of a
+ * message, stripping common prefixes ("Plan :", "Sommaire :", ...).
  */
-export function extractPlanDocument(message: string): PlanDocument | undefined {
-	const start = message.indexOf(PLAN_START_MARKER);
-	if (start === -1) return undefined;
-
-	const afterStart = start + PLAN_START_MARKER.length;
-	const end = message.indexOf(PLAN_END_MARKER, afterStart);
-	let content = (end === -1 ? message.slice(afterStart) : message.slice(afterStart, end)).trim();
-
-	// Strip a code fence the model may have wrapped the document in
-	const fenced = content.match(/^```(?:markdown|md)?\n([\s\S]*?)\n```$/);
-	if (fenced?.[1]) content = fenced[1].trim();
-
-	if (content.length === 0) return undefined;
-
-	const titleMatch = content.match(/^#\s+(.+)$/m);
-	const title = titleMatch?.[1]?.replace(/^(Plan\s*:?\s*|Recette\s*:?\s*|Fonctionnalit[ée]\s*:?\s*)/i, "").trim();
-
-	return { content, title: title && title.length > 0 ? title : undefined };
+export function extractHeadingTitle(message: string): string | undefined {
+	const titleMatch = message.match(/^#\s+(.+)$/m);
+	const title = titleMatch?.[1]
+		?.replace(/^(Plan\s*:?\s*|Recette\s*:?\s*|Sommaire\s*:?\s*|Fonctionnalit[ée]\s*:?\s*)/i, "")
+		.trim();
+	return title && title.length > 0 ? title : undefined;
 }

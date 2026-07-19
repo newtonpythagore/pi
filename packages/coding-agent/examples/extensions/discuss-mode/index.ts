@@ -4,26 +4,30 @@
  * Variant of the plan-mode extension focused on collaborative feature design.
  * While enabled, built-in write tools are disabled and the agent discusses
  * with the user how to build a feature. When the discussion is conclusive,
- * /generate-plan makes the agent produce a complete "recipe" markdown
- * document (files to create/modify, full code, commands, validation steps)
- * that the extension writes to plans/<feature-slug>.md itself.
+ * /generate-plan first produces a step outline for user validation, then the
+ * agent writes the complete "recipe" markdown document (files to
+ * create/modify, full code, commands, validation steps) itself with the write
+ * tool, restricted to plans/<feature-slug>/<feature-slug>.md.
  *
  * Features:
  * - /discuss command or Ctrl+Alt+D to toggle
  * - Bash restricted to allowlisted read-only commands while discussing
- * - /generate-plan [feature name] writes the recipe file
+ * - /generate-plan [feature name]: outline -> validation menu -> generation
  * - After generation: execute the plan, or enter plan edit mode where
  *   edit/write are allowed only inside the plans/ directory
+ * - /modif_plan [name]: edit an existing plan without regenerating it
+ * - External-change detection: warns the agent when the plan file was
+ *   modified outside the conversation
  * - Session persistence: state survives session resume
  */
 
-import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, TextContent } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Key } from "@earendil-works/pi-tui";
-import { extractPlanDocument, isSafeCommand, PLAN_END_MARKER, PLAN_START_MARKER, slugify } from "./utils.ts";
+import { extractHeadingTitle, isSafeCommand, slugify } from "./utils.ts";
 
 // Tools
 const DISCUSS_MODE_TOOLS = ["read", "bash", "grep", "find", "ls", "questionnaire"];
@@ -38,6 +42,7 @@ interface DiscussModeState {
 	planEditMode?: boolean;
 	toolsBeforeDiscussMode?: string[];
 	planFilePath?: string;
+	planFileMtimeMs?: number;
 }
 
 // Type guard for assistant messages
@@ -56,11 +61,15 @@ function getTextContent(message: AssistantMessage): string {
 export default function discussModeExtension(pi: ExtensionAPI): void {
 	let discussModeEnabled = false;
 	let planEditMode = false;
+	let generatingPlan = false;
 	let toolsBeforeDiscussMode: string[] | undefined;
 	let planFilePath: string | undefined;
-	// Set by /generate-plan until the resulting document has been captured.
+	let planFileMtimeMs: number | undefined;
+	// Set by /generate-plan while the outline awaits validation.
 	// Holds the feature name given as command argument ("" when omitted).
-	let pendingGeneration: string | undefined;
+	let pendingOutline: string | undefined;
+	// Slug of the plan being generated (phase 2)
+	let pendingSlug: string | undefined;
 
 	pi.registerFlag("discuss", {
 		description: "Start in discuss mode (collaborative feature design, read-only)",
@@ -69,7 +78,9 @@ export default function discussModeExtension(pi: ExtensionAPI): void {
 	});
 
 	function updateStatus(ctx: ExtensionContext): void {
-		if (planEditMode) {
+		if (generatingPlan) {
+			ctx.ui.setStatus("discuss-mode", ctx.ui.theme.fg("accent", "⚙ plan-gen"));
+		} else if (planEditMode) {
 			ctx.ui.setStatus("discuss-mode", ctx.ui.theme.fg("accent", "✏ plan-edit"));
 		} else if (discussModeEnabled) {
 			ctx.ui.setStatus("discuss-mode", ctx.ui.theme.fg("warning", "💬 discuss"));
@@ -142,27 +153,70 @@ export default function discussModeExtension(pi: ExtensionAPI): void {
 		}
 	}
 
+	function statPlanMtime(): number | undefined {
+		if (!planFilePath) return undefined;
+		try {
+			return statSync(resolve(process.cwd(), planFilePath)).mtimeMs;
+		} catch {
+			return undefined;
+		}
+	}
+
+	function listPlanFiles(): string[] {
+		try {
+			return (readdirSync(join(process.cwd(), PLANS_DIR), { recursive: true }) as string[])
+				.filter((f) => f.endsWith(".md"))
+				.map((f) => join(PLANS_DIR, f))
+				.sort();
+		} catch {
+			return [];
+		}
+	}
+
 	function persistState(): void {
 		pi.appendEntry("discuss-mode", {
 			enabled: discussModeEnabled,
 			planEditMode,
 			toolsBeforeDiscussMode,
 			planFilePath,
+			planFileMtimeMs,
 		});
 	}
 
-	function toggleDiscussMode(ctx: ExtensionContext): void {
-		pendingGeneration = undefined;
+	function enterPlanEditMode(ctx: ExtensionContext, fileRelPath: string): void {
+		discussModeEnabled = false;
+		generatingPlan = false;
+		planEditMode = true;
+		planFilePath = fileRelPath;
+		enablePlanEditModeTools();
+		planFileMtimeMs = statPlanMtime();
+		updateStatus(ctx);
+		persistState();
+		ctx.ui.notify(
+			`Plan edit mode on ${fileRelPath}: writes allowed only inside "${PLANS_DIR}/". Describe your changes; use /discuss to exit.`,
+			"info",
+		);
+	}
 
-		if (planEditMode) {
-			planEditMode = false;
-			restoreNormalModeTools();
-			ctx.ui.notify("Plan edit mode disabled. Full access restored.");
-			updateStatus(ctx);
-			persistState();
+	function exitAllModes(ctx: ExtensionContext, notice: string): void {
+		discussModeEnabled = false;
+		planEditMode = false;
+		generatingPlan = false;
+		pendingOutline = undefined;
+		pendingSlug = undefined;
+		restoreNormalModeTools();
+		ctx.ui.notify(notice);
+		updateStatus(ctx);
+		persistState();
+	}
+
+	function toggleDiscussMode(ctx: ExtensionContext): void {
+		if (planEditMode || generatingPlan) {
+			exitAllModes(ctx, "Plan mode disabled. Full access restored.");
 			return;
 		}
 
+		pendingOutline = undefined;
 		discussModeEnabled = !discussModeEnabled;
 		if (discussModeEnabled) {
 			enableDiscussModeTools();
@@ -181,7 +235,7 @@ export default function discussModeExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand("generate-plan", {
-		description: "Generate the recipe markdown file from the current discussion",
+		description: "Generate the recipe plan file (outline validated first)",
 		handler: async (args, ctx) => {
 			if (planEditMode) {
 				ctx.ui.notify("Plan edit mode: ask for changes directly, the plan file is edited in place.", "warning");
@@ -192,45 +246,74 @@ export default function discussModeExtension(pi: ExtensionAPI): void {
 				return;
 			}
 
-			pendingGeneration = args?.trim() ?? "";
-			const featureHint = pendingGeneration
-				? `Nom de la fonctionnalité : "${pendingGeneration}".`
+			pendingOutline = args?.trim() ?? "";
+			const featureHint = pendingOutline
+				? `Nom de la fonctionnalité : "${pendingOutline}".`
 				: "Déduis le nom de la fonctionnalité de la discussion.";
 
 			pi.sendMessage(
 				{
-					customType: "discuss-mode-generate",
-					content: `Génère maintenant le document de plan final à partir de notre discussion.
+					customType: "discuss-mode-outline",
+					content: `Prépare le sommaire du plan à partir de notre discussion.
 ${featureHint}
 
-Produis un document markdown complet, autonome, écrit comme une recette de cuisine :
-un développeur doit pouvoir l'appliquer À LA LETTRE sans se poser la moindre question.
+Produis UNIQUEMENT le sommaire, pas le plan complet :
+- Un titre de niveau 1 : "# <Nom de la fonctionnalité>"
+- La liste numérotée des étapes prévues, dans l'ordre d'exécution, avec pour
+  chacune une à deux lignes décrivant ce qu'elle fera (fichiers touchés,
+  commandes), sans code
 
-Exigences du document :
-- Commence par un titre de niveau 1 : "# <Nom de la fonctionnalité>"
-- Une section "## Contexte" résumant l'objectif et les décisions prises pendant la discussion
-- Une section "## Prérequis" (outils, versions, commandes d'installation exactes)
-- Puis des étapes numérotées "## Étape N — <titre>" dans l'ordre d'exécution. Chaque étape indique :
-  - L'action exacte : CRÉER / MODIFIER / SUPPRIMER, avec le chemin complet du fichier
-  - Le code COMPLET, prêt à copier-coller (pas de pseudo-code, pas d'extraits partiels,
-    pas de "..." ni de "reste inchangé" sans montrer le contenu final)
-  - Les commandes shell exactes à exécuter, le cas échéant
-  - Une sous-section "Validation" : comment vérifier que l'étape est correcte
-    (commande de test, comportement attendu)
-- Termine par une section "## Validation finale" décrivant la vérification de bout en bout
-- Si une information manque pour être exhaustif, écris quand même l'étape et insère
-  un bloc "> TODO : <ce qu'il reste à préciser>" à l'endroit concerné
-
-Encadre le document EXACTEMENT entre ces deux marqueurs, seuls sur leur ligne :
-${PLAN_START_MARKER}
-<document markdown>
-${PLAN_END_MARKER}
-
-N'écris aucun fichier toi-même : sors uniquement le document entre les marqueurs.`,
+N'écris aucun fichier. Ce sommaire sera soumis à validation avant la
+génération du plan complet.`,
 					display: true,
 				},
 				{ triggerTurn: true },
 			);
+		},
+	});
+
+	pi.registerCommand("modif_plan", {
+		description: "Edit an existing plan file from plans/ (skips generation)",
+		handler: async (args, ctx) => {
+			const arg = args?.trim() ?? "";
+			let chosen: string | undefined;
+
+			if (arg) {
+				const slug = slugify(arg);
+				const candidates = [
+					arg,
+					`${arg}.md`,
+					join(PLANS_DIR, arg),
+					join(PLANS_DIR, `${arg}.md`),
+					join(PLANS_DIR, arg, `${arg}.md`),
+					join(PLANS_DIR, slug, `${slug}.md`),
+					join(PLANS_DIR, `${slug}.md`),
+				];
+				for (const candidate of candidates) {
+					const abs = resolve(process.cwd(), candidate);
+					if (existsSync(abs) && statSync(abs).isFile() && isInsidePlansDir(abs)) {
+						chosen = relative(process.cwd(), abs);
+						break;
+					}
+				}
+				if (!chosen) {
+					const available = listPlanFiles();
+					const hint = available.length > 0 ? `\nAvailable plans:\n${available.join("\n")}` : "";
+					ctx.ui.notify(`Plan not found for "${arg}".${hint}`, "error");
+					return;
+				}
+			} else {
+				const available = listPlanFiles();
+				if (available.length === 0) {
+					ctx.ui.notify(`No plan found in "${PLANS_DIR}/". Generate one first with /generate-plan`, "warning");
+					return;
+				}
+				if (!ctx.hasUI) return;
+				chosen = await ctx.ui.select("Which plan do you want to edit?", available);
+				if (!chosen) return;
+			}
+
+			enterPlanEditMode(ctx, chosen);
 		},
 	});
 
@@ -239,28 +322,28 @@ N'écris aucun fichier toi-même : sors uniquement le document entre les marqueu
 		handler: async (ctx) => toggleDiscussMode(ctx),
 	});
 
-	// Block destructive bash commands in discuss/plan-edit mode,
-	// and restrict edit/write to the plans directory in plan edit mode
+	// Block destructive bash commands in discuss/plan-edit/generation mode,
+	// and restrict edit/write to the plans directory when writing is allowed
 	pi.on("tool_call", async (event) => {
-		if (!discussModeEnabled && !planEditMode) return;
+		if (!discussModeEnabled && !planEditMode && !generatingPlan) return;
 
 		if (event.toolName === "bash") {
 			const command = event.input.command as string;
 			if (!isSafeCommand(command)) {
 				return {
 					block: true,
-					reason: `Discuss mode: command blocked (not allowlisted). Use /discuss to disable discuss mode first.\nCommand: ${command}`,
+					reason: `Discuss mode: command blocked (not allowlisted). Use /discuss to disable plan/discuss mode first.\nCommand: ${command}`,
 				};
 			}
 		}
 
-		if (planEditMode && (event.toolName === "edit" || event.toolName === "write")) {
+		if ((planEditMode || generatingPlan) && (event.toolName === "edit" || event.toolName === "write")) {
 			const input = event.input as { path?: string; file_path?: string };
 			const target = input.path ?? input.file_path;
 			if (!target || !isInsidePlansDir(target)) {
 				return {
 					block: true,
-					reason: `Plan edit mode: writes are restricted to the "${PLANS_DIR}/" directory.\nBlocked path: ${target ?? "(missing)"}`,
+					reason: `Plan mode: writes are restricted to the "${PLANS_DIR}/" directory.\nBlocked path: ${target ?? "(missing)"}`,
 				};
 			}
 		}
@@ -290,24 +373,33 @@ N'écris aucun fichier toi-même : sors uniquement le document entre les marqueu
 		};
 	});
 
-	// Inject discussion context before agent starts
+	// Inject mode context before agent starts
 	pi.on("before_agent_start", async () => {
+		if (generatingPlan) return; // the generation message carries the instructions
+
 		if (planEditMode) {
+			let externalChangeWarning = "";
+			const currentMtime = statPlanMtime();
+			if (planFileMtimeMs !== undefined && currentMtime !== undefined && currentMtime !== planFileMtimeMs) {
+				externalChangeWarning =
+					"\n⚠ Le fichier du plan a été modifié en dehors de cette conversation. Relis-le avant toute édition.\n";
+				planFileMtimeMs = currentMtime;
+				persistState();
+			}
+
 			return {
 				message: {
 					customType: "plan-edit-context",
 					content: `[PLAN EDIT MODE ACTIVE]
-Tu es en mode modification de plan.
-
-Le plan courant est dans le fichier : ${planFilePath ?? `${PLANS_DIR}/`}
-Lis-le avant de le modifier si tu ne l'as pas déjà fait dans cette conversation.
-
+Nous travaillons sur la modification du plan : ${planFilePath ?? `${PLANS_DIR}/`}
+Tu n'as pas besoin de le relire à chaque tour ; relis une section seulement si tu as
+un doute sur son contenu exact avant de l'éditer.
+${externalChangeWarning}
 Règles :
-- Tu peux utiliser edit et write UNIQUEMENT sur des fichiers du dossier "${PLANS_DIR}/"
+- edit et write sont utilisables UNIQUEMENT dans le dossier "${PLANS_DIR}/"
   (toute écriture ailleurs sera bloquée)
 - Bash reste restreint aux commandes en lecture seule
-- Applique les modifications demandées par l'utilisateur directement dans le fichier,
-  par retouches ciblées (edit) plutôt qu'en réécrivant tout le document
+- Privilégie les retouches ciblées (edit) plutôt que la réécriture complète
 - Le document doit rester une recette exhaustive : code complet, chemins exacts,
   commandes, validation par étape`,
 					display: false,
@@ -340,77 +432,132 @@ lorsque l'utilisateur lancera la commande /generate-plan.`,
 		};
 	});
 
-	// Capture the generated plan document and write it to disk
-	pi.on("agent_end", async (event, ctx) => {
-		if (pendingGeneration === undefined) return;
-
-		const featureNameArg = pendingGeneration;
-		pendingGeneration = undefined;
-
-		const lastAssistant = [...event.messages].reverse().find(isAssistantMessage);
-		if (!lastAssistant) return;
-
-		const doc = extractPlanDocument(getTextContent(lastAssistant));
-		if (!doc) {
-			ctx.ui.notify("Plan document not found in the response (missing markers). Run /generate-plan again.", "error");
-			return;
-		}
-
-		const featureName = featureNameArg || doc.title || "plan";
-		const slug = slugify(featureName) || "plan";
-		const absoluteDir = join(process.cwd(), PLANS_DIR);
-		const absolutePath = join(absoluteDir, `${slug}.md`);
-
-		try {
-			mkdirSync(absoluteDir, { recursive: true });
-			writeFileSync(absolutePath, `${doc.content}\n`, "utf8");
-		} catch (error) {
-			ctx.ui.notify(`Failed to write plan file: ${String(error)}`, "error");
-			return;
-		}
-
-		planFilePath = relative(process.cwd(), absolutePath);
-		persistState();
-		ctx.ui.notify(`Plan written to ${planFilePath}`, "info");
-
-		if (!ctx.hasUI) return;
-
-		const choice = await ctx.ui.select(`Plan generated (${planFilePath}) - what next?`, [
-			"Execute the plan now",
-			"Modify the plan",
-			"Exit discuss mode",
-		]);
-
-		if (choice?.startsWith("Execute")) {
-			discussModeEnabled = false;
-			planEditMode = false;
-			restoreNormalModeTools();
-			updateStatus(ctx);
+	// Track the plan file mtime after turns where the agent may have written it
+	pi.on("turn_end", async () => {
+		if (!planEditMode && !generatingPlan) return;
+		const current = statPlanMtime();
+		if (current !== planFileMtimeMs) {
+			planFileMtimeMs = current;
 			persistState();
+		}
+	});
 
-			pi.sendMessage(
-				{
-					customType: "discuss-mode-execute",
-					content: `Le mode discussion est terminé, tous les outils sont réactivés.
-Exécute le plan décrit dans le fichier ${planFilePath}.
+	pi.on("agent_end", async (event, ctx) => {
+		// Phase 2 done: the agent was asked to write the plan file
+		if (generatingPlan) {
+			generatingPlan = false;
+			const slug = pendingSlug ?? "plan";
+			pendingSlug = undefined;
+
+			const expectedRel = join(PLANS_DIR, slug, `${slug}.md`);
+			if (!existsSync(resolve(process.cwd(), expectedRel))) {
+				updateStatus(ctx);
+				ctx.ui.notify(
+					`Plan file not found (${expectedRel}). The agent did not write it; run /generate-plan again.`,
+					"error",
+				);
+				return;
+			}
+
+			planFilePath = expectedRel;
+			planFileMtimeMs = statPlanMtime();
+			persistState();
+			ctx.ui.notify(`Plan written to ${expectedRel}`, "info");
+
+			if (!ctx.hasUI) return;
+			const choice = await ctx.ui.select(`Plan generated (${expectedRel}) - what next?`, [
+				"Execute the plan now",
+				"Modify the plan",
+				"Exit discuss mode",
+			]);
+
+			if (choice?.startsWith("Execute")) {
+				exitAllModes(ctx, "Plan mode disabled. Executing the plan with full access.");
+				pi.sendMessage(
+					{
+						customType: "discuss-mode-execute",
+						content: `Le mode discussion est terminé, tous les outils sont réactivés.
+Exécute le plan décrit dans le fichier ${expectedRel}.
 Lis le fichier puis applique chaque étape à la lettre, dans l'ordre,
 en effectuant la validation indiquée à la fin de chaque étape.`,
-					display: true,
-				},
-				{ triggerTurn: true, deliverAs: "followUp" },
-			);
-		} else if (choice === "Modify the plan") {
+						display: true,
+					},
+					{ triggerTurn: true, deliverAs: "followUp" },
+				);
+			} else if (choice === "Modify the plan") {
+				enterPlanEditMode(ctx, expectedRel);
+			} else if (choice === "Exit discuss mode") {
+				exitAllModes(ctx, "Discuss mode disabled. Full access restored.");
+			}
+			return;
+		}
+
+		// Phase 1 done: the agent produced the outline, ask for validation
+		if (pendingOutline === undefined || !ctx.hasUI) return;
+
+		const featureNameArg = pendingOutline;
+		const lastAssistant = [...event.messages].reverse().find(isAssistantMessage);
+		const title = lastAssistant ? extractHeadingTitle(getTextContent(lastAssistant)) : undefined;
+		const featureName = featureNameArg || title || "plan";
+		const slug = slugify(featureName) || "plan";
+
+		const choice = await ctx.ui.select(`Outline for "${featureName}" - what next?`, [
+			"Generate the full plan",
+			"Adjust the outline",
+			"Cancel",
+		]);
+
+		if (choice?.startsWith("Generate")) {
+			pendingOutline = undefined;
+			pendingSlug = slug;
+			generatingPlan = true;
 			discussModeEnabled = false;
-			planEditMode = true;
 			enablePlanEditModeTools();
 			updateStatus(ctx);
 			persistState();
-			ctx.ui.notify(
-				`Plan edit mode: writes allowed only inside "${PLANS_DIR}/". Describe your changes; use /discuss to exit.`,
-				"info",
+
+			const planRelPath = join(PLANS_DIR, slug, `${slug}.md`);
+			pi.sendMessage(
+				{
+					customType: "discuss-mode-generate",
+					content: `Le sommaire est validé. Génère maintenant le plan complet.
+
+Écris le document avec l'outil write dans le fichier : ${planRelPath}
+(l'écriture n'est autorisée que dans le dossier "${PLANS_DIR}/").
+
+Le document est une recette de cuisine exhaustive : un développeur doit pouvoir
+l'appliquer À LA LETTRE sans se poser la moindre question.
+
+Exigences du document :
+- Commence par un titre de niveau 1 : "# ${featureName}"
+- Une section "## Contexte" résumant l'objectif et les décisions prises pendant la discussion
+- Une section "## Prérequis" (outils, versions, commandes d'installation exactes)
+- Puis les étapes du sommaire validé, numérotées "## Étape N — <titre>". Chaque étape indique :
+  - L'action exacte : CRÉER / MODIFIER / SUPPRIMER, avec le chemin complet du fichier
+  - Le code COMPLET, prêt à copier-coller (pas de pseudo-code, pas d'extraits partiels,
+    pas de "..." ni de "reste inchangé" sans montrer le contenu final)
+  - Les commandes shell exactes à exécuter, le cas échéant
+  - Une sous-section "Validation" : comment vérifier que l'étape est correcte
+    (commande de test, comportement attendu)
+- Termine par une section "## Validation finale" décrivant la vérification de bout en bout
+- Si une information manque pour être exhaustif, écris quand même l'étape et insère
+  un bloc "> TODO : <ce qu'il reste à préciser>" à l'endroit concerné
+
+Une fois le fichier écrit, réponds simplement que le plan est prêt.`,
+					display: true,
+				},
+				{ triggerTurn: true },
 			);
-		} else if (choice === "Exit discuss mode") {
-			toggleDiscussMode(ctx);
+		} else if (choice === "Adjust the outline") {
+			const remarks = await ctx.ui.editor("Your remarks on the outline:", "");
+			if (remarks?.trim()) {
+				pi.sendUserMessage(
+					`Ajuste le sommaire du plan selon ces remarques, puis représente-le en entier :\n${remarks.trim()}`,
+				);
+			}
+			// pendingOutline stays set: the next agent_end shows this menu again
+		} else {
+			pendingOutline = undefined;
 		}
 	});
 
@@ -430,6 +577,7 @@ en effectuant la validation indiquée à la fin de chaque étape.`,
 			planEditMode = discussModeEntry.data.planEditMode ?? planEditMode;
 			toolsBeforeDiscussMode = discussModeEntry.data.toolsBeforeDiscussMode ?? toolsBeforeDiscussMode;
 			planFilePath = discussModeEntry.data.planFilePath ?? planFilePath;
+			planFileMtimeMs = discussModeEntry.data.planFileMtimeMs ?? planFileMtimeMs;
 		}
 
 		if (planEditMode) {
