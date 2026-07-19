@@ -8,8 +8,11 @@
  * 2. Read-only commands (ls, cat, grep, git status, ...) run freely.
  * 3. Everything else — anything that may modify the filesystem or system
  *    state (rm, rmdir, mv, find -exec, npm install, git commit, ...) —
- *    requires a user confirmation dialog. Without a UI to answer (--print,
- *    RPC without dialogs) the command is blocked.
+ *    requires a user confirmation dialog (shown in French, in red, with
+ *    "Non" preselected so a reflex Enter refuses). Refusing, dismissing the
+ *    dialog, or having no UI to answer (--print, RPC without dialogs) blocks
+ *    the command with a reason telling the agent the user forbids the
+ *    action entirely — it must not be attempted by any other means.
  *
  * Note: regex filtering is a first line of defense, not a sandbox. Commands
  * can be obfuscated (subshells, base64, scripts written to disk). For real
@@ -123,6 +126,16 @@ export function isReadOnly(command: string): boolean {
 
 // --- Extension ---------------------------------------------------------------
 
+const DENY_OPTION = "Non — refuser (défaut)";
+const ALLOW_OPTION = "Oui — autoriser";
+
+// Sent to the agent when the user refuses (or dismisses the dialog)
+const REFUSAL_REASON =
+	"L'utilisateur REFUSE cette commande. Il ne souhaite PAS que tu tentes de réaliser " +
+	"cette action d'une autre manière : n'effectue cette action d'aucune façon que ce soit " +
+	"(autre commande, script, outil, ou contournement). Considère-la comme interdite et " +
+	"poursuis la tâche sans elle.";
+
 export default function (pi: ExtensionAPI) {
 	pi.on("tool_call", async (event, ctx) => {
 		if (event.toolName !== "bash") return undefined;
@@ -138,20 +151,25 @@ export default function (pi: ExtensionAPI) {
 		// Tier 2: read-only, run freely
 		if (isReadOnly(command)) return undefined;
 
-		// Tier 3: anything else needs explicit user approval
+		// Tier 3: anything else needs explicit user approval.
+		// "No" is listed first so it is preselected; dismissing the dialog
+		// (Escape/timeout) is treated as the same firm refusal.
 		if (!ctx.hasUI) {
 			return {
 				block: true,
-				reason: "Command requires user confirmation but no UI is available (non-interactive mode)",
+				reason:
+					"Validation utilisateur requise mais aucune interface n'est disponible " +
+					"(mode non interactif). Commande bloquée par défaut.",
 			};
 		}
 
-		const approved = await ctx.ui.confirm(
-			"Command requires confirmation",
-			`This command may modify the filesystem or system state:\n\n${command}\n\nAllow it?`,
+		const prompt = ctx.ui.theme.fg(
+			"error",
+			`⚠ Validation requise — cette commande peut modifier le système de fichiers de manière irréversible :\n\n  ${command}\n\nAutoriser son exécution ?`,
 		);
-		if (!approved) {
-			return { block: true, reason: "Command denied by user" };
+		const choice = await ctx.ui.select(prompt, [DENY_OPTION, ALLOW_OPTION]);
+		if (choice !== ALLOW_OPTION) {
+			return { block: true, reason: REFUSAL_REASON };
 		}
 
 		return undefined;
