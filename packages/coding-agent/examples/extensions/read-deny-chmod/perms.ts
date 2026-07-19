@@ -7,18 +7,12 @@
 
 import { basename, isAbsolute, resolve } from "node:path";
 
-/** Permission bits we care about. */
-const FILE_READ_BITS = 0o444;
-const DIR_READ_TRAVERSE_BITS = 0o555;
+/** Locked mode: chmod 000 — no read, write, or execute for anyone. */
+export const LOCKED_MODE = 0o000;
 
-/** Compute the locked mode: files lose read; directories lose read+traverse. */
-export function lockMode(mode: number, isDir: boolean): number {
-	return isDir ? mode & ~DIR_READ_TRAVERSE_BITS : mode & ~FILE_READ_BITS;
-}
-
-/** True when the path is (partially) readable again and must be re-locked. */
-export function isUnlocked(mode: number, isDir: boolean): boolean {
-	return (mode & (isDir ? DIR_READ_TRAVERSE_BITS : FILE_READ_BITS)) !== 0;
+/** True when the path has any permission bit set again and must be re-locked. */
+export function isUnlocked(mode: number): boolean {
+	return (mode & 0o7777) !== LOCKED_MODE;
 }
 
 /** One protected path with its saved original permissions. */

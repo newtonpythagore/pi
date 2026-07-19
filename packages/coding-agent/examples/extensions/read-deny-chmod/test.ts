@@ -13,7 +13,7 @@ import {
 	buildNeedles,
 	type DenyEntry,
 	isUnlocked,
-	lockMode,
+	LOCKED_MODE,
 	parseState,
 	scanChmodCommand,
 	serializeState,
@@ -31,14 +31,11 @@ function check(desc: string, got: unknown, want: unknown): void {
 }
 
 // ---- Mode computation ----------------------------------------------------
-check("file 644 locks to 200", lockMode(0o644, false), 0o200);
-check("file 600 locks to 200", lockMode(0o600, false), 0o200);
-check("dir 755 locks to 200", lockMode(0o755, true), 0o200);
-check("dir 700 locks to 200", lockMode(0o700, true), 0o200);
-check("locked file is not unlocked", isUnlocked(0o200, false), false);
-check("readable file is unlocked", isUnlocked(0o644, false), true);
-check("dir with only x is unlocked (traversable)", isUnlocked(0o311, true), true);
-check("dir 200 is locked", isUnlocked(0o200, true), false);
+check("locked mode is 000", LOCKED_MODE, 0o000);
+check("locked path is not unlocked", isUnlocked(0o000), false);
+check("readable file is unlocked", isUnlocked(0o644), true);
+check("write-only file is unlocked", isUnlocked(0o200), true);
+check("dir with only x is unlocked (traversable)", isUnlocked(0o311), true);
 
 // ---- State round-trip ----------------------------------------------------
 const stateEntries: DenyEntry[] = [
@@ -73,12 +70,12 @@ const fileEntry: DenyEntry = { path: file, originalMode: 0o644, isDir: false };
 const dirEntry: DenyEntry = { path: dir, originalMode: 0o755, isDir: true };
 
 // Lock
-chmodSync(file, lockMode(fileEntry.originalMode, false));
-chmodSync(dir, lockMode(dirEntry.originalMode, true));
-check("locked file mode on disk", statSync(file).mode & 0o7777, 0o200);
-check("locked dir mode on disk", statSync(dir).mode & 0o7777, 0o200);
+chmodSync(file, LOCKED_MODE);
+chmodSync(dir, LOCKED_MODE);
+check("locked file mode on disk", statSync(file).mode & 0o7777, 0o000);
+check("locked dir mode on disk", statSync(dir).mode & 0o7777, 0o000);
 
-// Reading must fail (root ignores permission bits, so only assert as non-root)
+// Reading and writing must fail (root ignores permission bits, so only assert as non-root)
 if (typeof process.getuid === "function" && process.getuid() !== 0) {
 	let readFailed = false;
 	try {
@@ -87,16 +84,23 @@ if (typeof process.getuid === "function" && process.getuid() !== 0) {
 		readFailed = true;
 	}
 	check("reading locked file fails (EACCES)", readFailed, true);
+	let writeFailed = false;
+	try {
+		writeFileSync(file, "TAMPERED=1\n");
+	} catch {
+		writeFailed = true;
+	}
+	check("writing locked file fails (EACCES)", writeFailed, true);
 } else {
-	console.log("note: running as root — skipping the EACCES read assertion");
+	console.log("note: running as root — skipping the EACCES read/write assertions");
 }
 
-// Tamper detection: someone re-adds read permission
+// Tamper detection: someone re-adds a permission bit
 chmodSync(file, 0o644);
-check("tampered file detected as unlocked", isUnlocked(statSync(file).mode & 0o7777, false), true);
+check("tampered file detected as unlocked", isUnlocked(statSync(file).mode & 0o7777), true);
 // Re-lock (what the inotify callback does)
-chmodSync(file, lockMode(fileEntry.originalMode, false));
-check("re-locked file mode on disk", statSync(file).mode & 0o7777, 0o200);
+chmodSync(file, LOCKED_MODE);
+check("re-locked file mode on disk", statSync(file).mode & 0o7777, 0o000);
 
 // Restore
 chmodSync(file, fileEntry.originalMode);

@@ -2,12 +2,13 @@
  * Read Deny (chmod) Extension
  *
  * The simpler sibling of `read-blocklist/`: instead of intercepting tools,
- * it removes read permission from listed files/directories at the OS level
- * for the whole pi session, and restores the original permissions on exit.
- * See README.md for design, guarantees, and comparison with read-blocklist.
+ * it removes all permissions (chmod 000) from listed files/directories at
+ * the OS level for the whole pi session — no read, no write — and restores
+ * the original permissions on exit. See README.md for design, guarantees,
+ * and comparison with read-blocklist.
  *
  * - Exact paths only (no wildcards) in `.pi-read-deny.json` at the project
- *   root: files lose read (a-r), directories lose read+traverse (a-rx).
+ *   root: files and directories are locked to mode 000.
  * - Original modes are persisted to `.pi/read-deny.state.json` BEFORE
  *   locking, so a crashed session is auto-repaired at next startup.
  * - An inotify watcher (fs.watch) instantly re-locks a path if its
@@ -33,7 +34,7 @@ import {
 	buildNeedles,
 	type DenyEntry,
 	isUnlocked,
-	lockMode,
+	LOCKED_MODE,
 	parseState,
 	scanChmodCommand,
 	serializeState,
@@ -141,14 +142,14 @@ function lockAll(ctx: ExtensionContext, configuredPaths: string[]): void {
 
 	for (const entry of entries) {
 		try {
-			chmodSync(entry.path, lockMode(entry.originalMode, entry.isDir));
+			chmodSync(entry.path, LOCKED_MODE);
 		} catch (err) {
 			notify(ctx, `read-deny: could not lock ${entry.path}: ${String(err)}`, "error");
 		}
 	}
 	needles = buildNeedles(ctx.cwd, configuredPaths);
 	active = true;
-	notify(ctx, `read-deny: read access removed on ${entries.length} path(s) for this session`, "info");
+	notify(ctx, `read-deny: all access (chmod 000) removed on ${entries.length} path(s) for this session`, "info");
 }
 
 /** Restore all original permissions and drop the state file. */
@@ -182,9 +183,9 @@ function relockIfNeeded(ctx: ExtensionContext, entry: DenyEntry): void {
 	} catch {
 		return; // Deleted; the rename handler deals with recreation.
 	}
-	if (isUnlocked(mode, entry.isDir)) {
+	if (isUnlocked(mode)) {
 		try {
-			chmodSync(entry.path, lockMode(entry.originalMode, entry.isDir));
+			chmodSync(entry.path, LOCKED_MODE);
 			notify(ctx, `read-deny: permissions of ${entry.path} were changed externally — re-locked`, "warning");
 		} catch (err) {
 			notify(ctx, `read-deny: failed to re-lock ${entry.path}: ${String(err)}`, "error");
@@ -262,7 +263,7 @@ export default function (pi: ExtensionAPI) {
 			notify(ctx, `read-deny: blocked permission change on protected path (${hit})`, "warning");
 			return {
 				block: true,
-				reason: `Read access to "${hit}" is intentionally blocked for this session. Do not attempt to bypass this protection (system commands, copying, or any other means): any attempt will fail. Continue your task treating this file or directory as unavailable.`,
+				reason: `Access to "${hit}" is intentionally blocked for this session. Do not attempt to bypass this protection (system commands, copying, or any other means): any attempt will fail. Continue your task treating this file or directory as unavailable.`,
 			};
 		}
 		return undefined;

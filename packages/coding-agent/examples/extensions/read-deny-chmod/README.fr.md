@@ -4,21 +4,21 @@
 
 Le **petit frère simplifié** de [`read-blocklist/`](../read-blocklist/) : au
 lieu d'intercepter les outils de pi, il demande au système d'exploitation de
-faire le travail. Au démarrage de la session, il retire le droit de lecture
-(`chmod`) des fichiers et répertoires que vous listez ; à la sortie, il
-restaure les permissions d'origine. Tant que le verrou est actif, **toute**
-lecture échoue avec `EACCES` — l'outil `read` de pi, ripgrep, `cat`, un
-one-liner python, n'importe quoi — parce que c'est le système de fichiers
-lui-même qui refuse, sans aucune analyse de commande et sans aucun surcoût
-par appel.
+faire le travail. Au démarrage de la session, il retire toutes les
+permissions (`chmod 000`) des fichiers et répertoires que vous listez ; à la
+sortie, il restaure les permissions d'origine. Tant que le verrou est actif,
+**toute** lecture et **toute** écriture échouent avec `EACCES` — les outils
+`read` et `write` de pi, ripgrep, `cat`, un one-liner python, n'importe
+quoi — parce que c'est le système de fichiers lui-même qui refuse, sans
+aucune analyse de commande et sans aucun surcoût par appel.
 
 ```
 démarrage                      pendant que pi tourne              sortie
 ─────────                      ─────────────────────              ──────
 sauve les modes d'origine      watch inotify sur chaque chemin    restaure
   → .pi/read-deny.state.json     → re-verrouille instantanément   les modes
-chmod a-r  (fichiers)             si les droits changent          d'origine
-chmod a-rx (répertoires)       bash chmod/chown/chattr/setfacl
+chmod 000 (fichiers et            si les droits changent          d'origine
+           répertoires)        bash chmod/chown/chattr/setfacl
                                  sur un chemin protégé → bloqué
 ```
 
@@ -46,16 +46,16 @@ joker est ignorée avec un avertissement.
 
 1. **Démarrage** (`session_start`) : le mode courant de chaque chemin listé
    est lu et persisté dans `.pi/read-deny.state.json` **avant** tout chmod.
-   Ensuite les fichiers perdent leurs bits de lecture (`a-r`) et les
-   répertoires perdent lecture et traversée (`a-rx` — sans le bit `x`, le
-   contenu est inaccessible même en connaissant le chemin exact). Un seul
-   appel système par chemin (`fs.chmodSync`, l'équivalent exact de la
-   commande `chmod`, sans lancer de shell).
+   Ensuite chaque chemin est verrouillé en mode `000` — ni lecture, ni
+   écriture, ni exécution pour personne (pour un répertoire, le contenu est
+   inaccessible même en connaissant le chemin exact). Un seul appel système
+   par chemin (`fs.chmodSync`, l'équivalent exact de la commande `chmod`,
+   sans lancer de shell).
 
 2. **Pendant l'exécution** : un observateur inotify (`fs.watch`) est attaché
    à chaque chemin protégé. Si quelqu'un — l'agent, un autre terminal, un
-   autre programme — remet le droit de lecture, le noyau notifie pi
-   instantanément et le chemin est re-verrouillé. Purement événementiel :
+   autre programme — remet un bit de permission quelconque, le noyau notifie
+   pi instantanément et le chemin est re-verrouillé. Purement événementiel :
    pas de polling, pas de timer, aucun coût par appel d'outil. En première
    ligne, les commandes bash invoquant `chmod`/`chown`/`chattr`/`setfacl`
    sur un chemin protégé sont bloquées d'office ; l'observateur est le filet
@@ -100,10 +100,10 @@ sur le disque.
 ## Garanties et limites
 
 - L'application est faite par le système de fichiers, donc elle s'applique à
-  l'identique à tous les chemins de lecture — aucun contournement par
-  guillemets astucieux, jokers, liens symboliques vers le chemin verrouillé,
-  interpréteurs ou sous-processus. Un symlink n'est qu'un nom : l'ouvrir
-  aboutit quand même sur la cible verrouillée.
+  l'identique à tous les chemins d'accès, lecture comme écriture — aucun
+  contournement par guillemets astucieux, jokers, liens symboliques vers le
+  chemin verrouillé, interpréteurs ou sous-processus. Un symlink n'est qu'un
+  nom : l'ouvrir aboutit quand même sur la cible verrouillée.
 - **Lancez pi avec un utilisateur normal.** root (et les process disposant
   de `CAP_DAC_OVERRIDE`) ignorent totalement les bits de permission.
 - Le propriétaire d'un fichier peut toujours refaire un `chmod`. L'agent est
@@ -120,6 +120,10 @@ sur le disque.
   indépendant.
 - Unix uniquement (Linux/macOS). Sous Windows, `chmod` ne peut pas retirer
   le droit de lecture.
+- Un fichier verrouillé ne peut pas être modifié en place, mais son *entrée
+  de répertoire* le peut : si le répertoire parent est accessible en
+  écriture, le fichier peut toujours être supprimé ou remplacé. Protégez
+  aussi le répertoire parent si c'est important.
 
 Lancez les tests unitaires avec :
 

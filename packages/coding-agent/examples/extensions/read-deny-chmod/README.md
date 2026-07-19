@@ -4,19 +4,20 @@
 
 The **simpler sibling** of [`read-blocklist/`](../read-blocklist/): instead of
 intercepting pi's tools, it asks the operating system to do the work. At
-session start it removes read permission (`chmod`) from the files and
+session start it removes all permissions (`chmod 000`) from the files and
 directories you list; on exit it restores the original permissions. While the
-lock is active, **every** read fails with `EACCES` — pi's `read` tool,
-ripgrep, `cat`, a python one-liner, anything — because the filesystem itself
-refuses, with zero command analysis and zero per-call overhead.
+lock is active, **every** read and write fails with `EACCES` — pi's `read`
+and `write` tools, ripgrep, `cat`, a python one-liner, anything — because the
+filesystem itself refuses, with zero command analysis and zero per-call
+overhead.
 
 ```
 startup                        while pi runs                     exit
 ───────                        ─────────────                     ────
 save original modes            inotify watch on each path        restore
   → .pi/read-deny.state.json     → re-lock instantly if perms    original
-chmod a-r  (files)                 are changed externally        modes
-chmod a-rx (directories)       bash chmod/chown/chattr/setfacl
+chmod 000 (files and               are changed externally        modes
+           directories)        bash chmod/chown/chattr/setfacl
                                  on a protected path → blocked
 ```
 
@@ -43,15 +44,15 @@ A bare JSON array is also accepted. Paths are relative to the project root
 
 1. **Startup** (`session_start`): the current mode of each listed path is
    read and persisted to `.pi/read-deny.state.json` **before** any chmod.
-   Then files lose their read bits (`a-r`) and directories lose read and
-   traverse (`a-rx` — without `x`, contents are unreachable even with the
-   exact path). One syscall per path (`fs.chmodSync`, the exact equivalent
-   of the `chmod` command, without spawning a shell).
+   Then every path is locked to mode `000` — no read, write, or execute for
+   anyone (for a directory, contents are unreachable even with the exact
+   path). One syscall per path (`fs.chmodSync`, the exact equivalent of the
+   `chmod` command, without spawning a shell).
 
 2. **While running**: an inotify watcher (`fs.watch`) is attached to every
    protected path. If anyone — the agent, another terminal, another program —
-   re-adds read permission, the kernel notifies pi instantly and the path is
-   re-locked. Event-driven only: no polling, no timer, no per-tool-call cost.
+   re-adds any permission bit, the kernel notifies pi instantly and the path
+   is re-locked. Event-driven only: no polling, no timer, no per-tool-call cost.
    As a first line, bash commands invoking `chmod`/`chown`/`chattr`/`setfacl`
    on a protected path are blocked outright; the watcher is the safety net
    for anything sneakier.
@@ -92,9 +93,9 @@ not alter permissions on disk.
 ## Guarantees and limitations
 
 - Enforcement is done by the filesystem, so it applies identically to every
-  read path — no bypass by clever quoting, wildcards, symlinks to the locked
-  path, interpreters, or subprocesses. A symlink is only a name: opening it
-  still hits the locked target.
+  access path, read or write — no bypass by clever quoting, wildcards,
+  symlinks to the locked path, interpreters, or subprocesses. A symlink is
+  only a name: opening it still hits the locked target.
 - **Run pi as a regular user.** root (and processes with `CAP_DAC_OVERRIDE`)
   ignore permission bits entirely.
 - The owner of a file may always `chmod` it back. The agent is therefore
@@ -108,6 +109,9 @@ not alter permissions on disk.
 - Hard links to a locked file share its inode and are equally unreadable;
   but a *copy* made before the session started is an independent file.
 - Unix only (Linux/macOS). On Windows, `chmod` cannot remove read access.
+- A locked file cannot be modified in place, but its *directory entry* can:
+  if the parent directory is writable, the file can still be deleted or
+  replaced. Protect the parent directory too if that matters.
 
 Run the unit tests with:
 
