@@ -1,11 +1,15 @@
 /**
  * Permission Gate Extension
  *
- * Blocks potentially dangerous bash commands unconditionally.
+ * Three-tier bash command gate:
  *
- * Covered categories: data destruction, privilege escalation, system/process
- * disruption, remote code execution, firewall tampering, git history loss,
- * secrets access, audit-trail wiping, and package/filesystem changes.
+ * 1. Dangerous commands (rm -rf, sudo, mkfs, force push, ...) are blocked
+ *    unconditionally — no prompt, no override.
+ * 2. Read-only commands (ls, cat, grep, git status, ...) run freely.
+ * 3. Everything else — anything that may modify the filesystem or system
+ *    state (rm, rmdir, mv, find -exec, npm install, git commit, ...) —
+ *    requires a user confirmation dialog. Without a UI to answer (--print,
+ *    RPC without dialogs) the command is blocked.
  *
  * Note: regex filtering is a first line of defense, not a sandbox. Commands
  * can be obfuscated (subshells, base64, scripts written to disk). For real
@@ -18,6 +22,8 @@ interface DangerousPattern {
 	pattern: RegExp;
 	description: string;
 }
+
+// --- Tier 1: blocked unconditionally ---------------------------------------
 
 const dangerousPatterns: DangerousPattern[] = [
 	// --- Data destruction ---
@@ -74,15 +80,78 @@ const dangerousPatterns: DangerousPattern[] = [
 	{ pattern: /\bln\s+-\w*f\w*\s+\S+\s+\/(etc|bin|sbin|lib|usr)\//i, description: "forced symlink into system path" },
 ];
 
+// --- Tier 2: read-only commands that run without confirmation ---------------
+
+// Each segment of the command line (split on &&, ||, ;, |) must start with
+// one of these to skip the confirmation dialog.
+const readOnlyPatterns: RegExp[] = [
+	/^cd\b/,
+	/^(ls|pwd|tree|du|df|stat|file|realpath|readlink|basename|dirname)\b/,
+	/^(cat|head|tail|less|more|bat)\b/,
+	/^(grep|rg|fd|wc|sort|uniq|cut|tr|diff|cmp|comm|column|xxd|strings)\b/,
+	/^find\b(?!.*\s-(exec|execdir|delete|ok|okdir)\b)/,
+	/^(echo|printf|test|true|false|sleep)\b/,
+	/^(which|whereis|type|command\s+-v)\b/,
+	/^(env|printenv|uname|hostname|whoami|id|date|cal|uptime|nproc|arch)\b/,
+	/^(ps|top|htop|free|pgrep|jobs)\b/,
+	/^git\s+(status|log|diff|show|shortlog|blame|describe|remote(\s+-v)?|branch(\s+(-a|-r|-v|--list|--show-current))?|tag(\s+(-l|--list))?|stash\s+list|config\s+(--get|--list|-l)|rev-parse|rev-list|ls-files|ls-tree|ls-remote|cat-file|reflog(\s+show)?|worktree\s+list|count-objects)\b/,
+	/^(npm|pnpm)\s+(list|ls|view|info|search|outdated|audit(?!\s+fix)|why|root|prefix)\b/,
+	/^yarn\s+(list|info|why|audit)\b/,
+	/^(node|npm|npx|python3?|pip3?|go|cargo|rustc|java|ruby|perl|php|tsc|deno|bun)\s+(--version|-v|version)\b/,
+	/^(jq|yq)\b/,
+	/^awk\b(?!.*-i\b)/,
+	/^sed\s+-n\b/,
+	/^(md5sum|sha\d+sum|cksum|b2sum)\b/,
+	/^(curl|wget\s+-O\s*-)\s/,
+];
+
+// Redirections that don't write to a file
+const harmlessRedirects = /\d?>&\d|\d?>{1,2}\s*\/dev\/null/g;
+
+export function isReadOnly(command: string): boolean {
+	// Any remaining output redirection writes to a file
+	const stripped = command.replace(harmlessRedirects, "");
+	if (/>/.test(stripped)) return false;
+
+	const segments = stripped
+		.split(/&&|\|\||[;|\n]/)
+		.map((s) => s.trim())
+		.filter((s) => s.length > 0);
+
+	return segments.length > 0 && segments.every((segment) => readOnlyPatterns.some((p) => p.test(segment)));
+}
+
+// --- Extension ---------------------------------------------------------------
+
 export default function (pi: ExtensionAPI) {
-	pi.on("tool_call", (event) => {
+	pi.on("tool_call", async (event, ctx) => {
 		if (event.toolName !== "bash") return undefined;
 
 		const command = event.input.command as string;
-		const match = dangerousPatterns.find(({ pattern }) => pattern.test(command));
 
+		// Tier 1: hard block, no override
+		const match = dangerousPatterns.find(({ pattern }) => pattern.test(command));
 		if (match) {
 			return { block: true, reason: `Dangerous command blocked by policy (${match.description})` };
+		}
+
+		// Tier 2: read-only, run freely
+		if (isReadOnly(command)) return undefined;
+
+		// Tier 3: anything else needs explicit user approval
+		if (!ctx.hasUI) {
+			return {
+				block: true,
+				reason: "Command requires user confirmation but no UI is available (non-interactive mode)",
+			};
+		}
+
+		const approved = await ctx.ui.confirm(
+			"Command requires confirmation",
+			`This command may modify the filesystem or system state:\n\n${command}\n\nAllow it?`,
+		);
+		if (!approved) {
+			return { block: true, reason: "Command denied by user" };
 		}
 
 		return undefined;

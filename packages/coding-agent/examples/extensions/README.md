@@ -18,7 +18,7 @@ cp permission-gate.ts ~/.pi/agent/extensions/
 
 | Extension | Description |
 |-----------|-------------|
-| `permission-gate.ts` | Unconditionally blocks dangerous bash commands (rm -rf, sudo, mkfs, force push, etc.) |
+| `permission-gate.ts` | Three-tier bash gate: dangerous commands (rm -rf, sudo, mkfs, force push, etc.) blocked unconditionally, read-only commands run freely, everything else requires user confirmation |
 | `project-trust.ts` | Demonstrates the `project_trust` event for user/global and CLI extensions |
 | `protected-paths.ts` | Blocks writes to protected paths (.env, .git/, node_modules/) |
 | `read-blocklist/` | Blocks *reads* of files/dirs listed in a per-project `.pi-read-blocklist.json`: blocks `read`/`grep`/`find` (symlinks resolved), filters search results, and syncs `denyRead` into the sandbox extension for OS-level bash enforcement |
