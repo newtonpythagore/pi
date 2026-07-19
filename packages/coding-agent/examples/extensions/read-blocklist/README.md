@@ -1,5 +1,7 @@
 # Read Blocklist
 
+*[Version française](./README.fr.md)*
+
 Forbids the agent from **reading** files and directories you list in a simple
 per-project JSON file. Writes are out of scope (see the `protected-paths.ts`
 example for that); this extension is about keeping secrets — `.env` files,
