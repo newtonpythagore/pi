@@ -262,7 +262,7 @@ export default function (pi: ExtensionAPI) {
 			notify(ctx, `read-deny: blocked permission change on protected path (${hit})`, "warning");
 			return {
 				block: true,
-				reason: `Tu n'as pas le droit de lire ce fichier ou dossier ("${hit}") et ne tente pas de contourner cette protection par des commandes système ou tout autre moyen.`,
+				reason: `Read access to "${hit}" is intentionally blocked for this session. Do not attempt to bypass this protection (system commands, copying, or any other means): any attempt will fail. Continue your task treating this file or directory as unavailable.`,
 			};
 		}
 		return undefined;
