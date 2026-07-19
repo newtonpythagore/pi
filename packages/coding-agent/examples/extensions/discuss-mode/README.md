@@ -36,8 +36,26 @@ développeur peut appliquer à la lettre, sans se poser la moindre question.
 5. Un choix est ensuite proposé :
    - **Execute the plan now** — sortir du mode discussion, restaurer tous les outils
      et demander à l'IA d'appliquer le plan à la lettre
-   - **Stay in discuss mode (refine)** — continuer la discussion et régénérer plus tard
+   - **Modify the plan** — passer en mode modification de plan (voir ci-dessous)
    - **Exit discuss mode** — sortir du mode sans exécuter
+
+## Mode modification de plan
+
+Après génération, choisir **Modify the plan** permet d'itérer sur le document de
+manière économe : plutôt que de régénérer tout le plan à chaque retouche (coûteux
+en tokens et sujet aux erreurs de recopie), l'IA modifie le fichier directement
+par retouches ciblées avec l'outil `edit`.
+
+Dans ce mode :
+- `edit` et `write` sont réactivés, mais **uniquement pour les fichiers du dossier
+  `plans/`** — toute écriture ailleurs est bloquée par l'extension, qui vérifie le
+  chemin après résolution des `../` et des liens symboliques
+- Bash reste restreint aux commandes en lecture seule
+- L'historique de la conversation est conservé : chaque nouvelle demande de
+  modification bénéficie du contexte des échanges précédents
+- `/discuss` quitte le mode et restaure tous les outils
+- Pour exécuter le plan une fois les modifications terminées : quitter avec
+  `/discuss` puis demander l'exécution, le fichier faisant foi
 
 ## Contenu du fichier généré
 
@@ -70,6 +88,15 @@ Si une information manque, le document est généré quand même avec des blocs
 - À la fin du tour, l'extension extrait le contenu entre les marqueurs,
   calcule un slug à partir du nom de la fonctionnalité (accents retirés,
   caractères spéciaux remplacés par des tirets) et écrit `plans/<slug>.md`
+
+### Mode modification de plan
+- Un contexte caché est injecté à chaque tour : le chemin du plan courant,
+  l'obligation de le lire avant modification, et la règle « écriture uniquement
+  dans `plans/` »
+- Le hook `tool_call` valide chaque appel `edit`/`write` : le chemin cible est
+  résolu en absolu, son dossier parent et le fichier lui-même sont canonisés
+  (liens symboliques suivis), et l'appel est bloqué si le résultat sort de
+  `plans/`
 
 ### Allowlist de commandes
 

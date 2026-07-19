@@ -12,12 +12,13 @@
  * - /discuss command or Ctrl+Alt+D to toggle
  * - Bash restricted to allowlisted read-only commands while discussing
  * - /generate-plan [feature name] writes the recipe file
- * - After generation: optionally execute the plan with full tool access
+ * - After generation: execute the plan, or enter plan edit mode where
+ *   edit/write are allowed only inside the plans/ directory
  * - Session persistence: state survives session resume
  */
 
-import { mkdirSync, writeFileSync } from "node:fs";
-import { join, relative } from "node:path";
+import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, TextContent } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -34,6 +35,7 @@ const PLANS_DIR = "plans";
 
 interface DiscussModeState {
 	enabled: boolean;
+	planEditMode?: boolean;
 	toolsBeforeDiscussMode?: string[];
 	planFilePath?: string;
 }
@@ -53,6 +55,7 @@ function getTextContent(message: AssistantMessage): string {
 
 export default function discussModeExtension(pi: ExtensionAPI): void {
 	let discussModeEnabled = false;
+	let planEditMode = false;
 	let toolsBeforeDiscussMode: string[] | undefined;
 	let planFilePath: string | undefined;
 	// Set by /generate-plan until the resulting document has been captured.
@@ -66,7 +69,9 @@ export default function discussModeExtension(pi: ExtensionAPI): void {
 	});
 
 	function updateStatus(ctx: ExtensionContext): void {
-		if (discussModeEnabled) {
+		if (planEditMode) {
+			ctx.ui.setStatus("discuss-mode", ctx.ui.theme.fg("accent", "✏ plan-edit"));
+		} else if (discussModeEnabled) {
 			ctx.ui.setStatus("discuss-mode", ctx.ui.theme.fg("warning", "💬 discuss"));
 		} else {
 			ctx.ui.setStatus("discuss-mode", undefined);
@@ -103,18 +108,62 @@ export default function discussModeExtension(pi: ExtensionAPI): void {
 		toolsBeforeDiscussMode = undefined;
 	}
 
+	function enablePlanEditModeTools(): void {
+		if (toolsBeforeDiscussMode === undefined) {
+			toolsBeforeDiscussMode = pi.getActiveTools();
+		}
+		pi.setActiveTools(uniqueToolNames([...getDiscussModeTools(toolsBeforeDiscussMode), "edit", "write"]));
+	}
+
+	// Check that a path targeted by edit/write stays inside the plans directory,
+	// after resolving relative segments and symlinks.
+	function isInsidePlansDir(rawPath: string): boolean {
+		const plansDir = join(process.cwd(), PLANS_DIR);
+		mkdirSync(plansDir, { recursive: true });
+		const realPlans = realpathSync(plansDir);
+		const resolved = resolve(process.cwd(), rawPath);
+
+		let realParent: string;
+		try {
+			realParent = realpathSync(dirname(resolved));
+		} catch {
+			return false;
+		}
+		if (realParent !== realPlans && !realParent.startsWith(realPlans + sep)) {
+			return false;
+		}
+
+		// If the target already exists it may itself be a symlink pointing elsewhere
+		try {
+			const realTarget = realpathSync(resolved);
+			return realTarget === realPlans || realTarget.startsWith(realPlans + sep);
+		} catch {
+			return true; // does not exist yet: parent check above is enough
+		}
+	}
+
 	function persistState(): void {
 		pi.appendEntry("discuss-mode", {
 			enabled: discussModeEnabled,
+			planEditMode,
 			toolsBeforeDiscussMode,
 			planFilePath,
 		});
 	}
 
 	function toggleDiscussMode(ctx: ExtensionContext): void {
-		discussModeEnabled = !discussModeEnabled;
 		pendingGeneration = undefined;
 
+		if (planEditMode) {
+			planEditMode = false;
+			restoreNormalModeTools();
+			ctx.ui.notify("Plan edit mode disabled. Full access restored.");
+			updateStatus(ctx);
+			persistState();
+			return;
+		}
+
+		discussModeEnabled = !discussModeEnabled;
 		if (discussModeEnabled) {
 			enableDiscussModeTools();
 			ctx.ui.notify("Discuss mode enabled. Built-in write tools disabled.");
@@ -134,6 +183,10 @@ export default function discussModeExtension(pi: ExtensionAPI): void {
 	pi.registerCommand("generate-plan", {
 		description: "Generate the recipe markdown file from the current discussion",
 		handler: async (args, ctx) => {
+			if (planEditMode) {
+				ctx.ui.notify("Plan edit mode: ask for changes directly, the plan file is edited in place.", "warning");
+				return;
+			}
 			if (!discussModeEnabled) {
 				ctx.ui.notify("Not in discuss mode. Enable it first with /discuss", "warning");
 				return;
@@ -186,27 +239,41 @@ N'écris aucun fichier toi-même : sors uniquement le document entre les marqueu
 		handler: async (ctx) => toggleDiscussMode(ctx),
 	});
 
-	// Block destructive bash commands in discuss mode
+	// Block destructive bash commands in discuss/plan-edit mode,
+	// and restrict edit/write to the plans directory in plan edit mode
 	pi.on("tool_call", async (event) => {
-		if (!discussModeEnabled || event.toolName !== "bash") return;
+		if (!discussModeEnabled && !planEditMode) return;
 
-		const command = event.input.command as string;
-		if (!isSafeCommand(command)) {
-			return {
-				block: true,
-				reason: `Discuss mode: command blocked (not allowlisted). Use /discuss to disable discuss mode first.\nCommand: ${command}`,
-			};
+		if (event.toolName === "bash") {
+			const command = event.input.command as string;
+			if (!isSafeCommand(command)) {
+				return {
+					block: true,
+					reason: `Discuss mode: command blocked (not allowlisted). Use /discuss to disable discuss mode first.\nCommand: ${command}`,
+				};
+			}
+		}
+
+		if (planEditMode && (event.toolName === "edit" || event.toolName === "write")) {
+			const input = event.input as { path?: string; file_path?: string };
+			const target = input.path ?? input.file_path;
+			if (!target || !isInsidePlansDir(target)) {
+				return {
+					block: true,
+					reason: `Plan edit mode: writes are restricted to the "${PLANS_DIR}/" directory.\nBlocked path: ${target ?? "(missing)"}`,
+				};
+			}
 		}
 	});
 
-	// Filter out stale discuss mode context when not in discuss mode
+	// Filter out stale mode context messages once the matching mode is off
 	pi.on("context", async (event) => {
-		if (discussModeEnabled) return;
-
 		return {
 			messages: event.messages.filter((m) => {
 				const msg = m as AgentMessage & { customType?: string };
-				if (msg.customType === "discuss-mode-context") return false;
+				if (msg.customType === "discuss-mode-context" && !discussModeEnabled) return false;
+				if (msg.customType === "plan-edit-context" && !planEditMode) return false;
+				if (discussModeEnabled) return true;
 				if (msg.role !== "user") return true;
 
 				const content = msg.content;
@@ -225,6 +292,29 @@ N'écris aucun fichier toi-même : sors uniquement le document entre les marqueu
 
 	// Inject discussion context before agent starts
 	pi.on("before_agent_start", async () => {
+		if (planEditMode) {
+			return {
+				message: {
+					customType: "plan-edit-context",
+					content: `[PLAN EDIT MODE ACTIVE]
+Tu es en mode modification de plan.
+
+Le plan courant est dans le fichier : ${planFilePath ?? `${PLANS_DIR}/`}
+Lis-le avant de le modifier si tu ne l'as pas déjà fait dans cette conversation.
+
+Règles :
+- Tu peux utiliser edit et write UNIQUEMENT sur des fichiers du dossier "${PLANS_DIR}/"
+  (toute écriture ailleurs sera bloquée)
+- Bash reste restreint aux commandes en lecture seule
+- Applique les modifications demandées par l'utilisateur directement dans le fichier,
+  par retouches ciblées (edit) plutôt qu'en réécrivant tout le document
+- Le document doit rester une recette exhaustive : code complet, chemins exacts,
+  commandes, validation par étape`,
+					display: false,
+				},
+			};
+		}
+
 		if (!discussModeEnabled) return;
 
 		return {
@@ -287,12 +377,13 @@ lorsque l'utilisateur lancera la commande /generate-plan.`,
 
 		const choice = await ctx.ui.select(`Plan generated (${planFilePath}) - what next?`, [
 			"Execute the plan now",
-			"Stay in discuss mode (refine)",
+			"Modify the plan",
 			"Exit discuss mode",
 		]);
 
 		if (choice?.startsWith("Execute")) {
 			discussModeEnabled = false;
+			planEditMode = false;
 			restoreNormalModeTools();
 			updateStatus(ctx);
 			persistState();
@@ -308,10 +399,19 @@ en effectuant la validation indiquée à la fin de chaque étape.`,
 				},
 				{ triggerTurn: true, deliverAs: "followUp" },
 			);
+		} else if (choice === "Modify the plan") {
+			discussModeEnabled = false;
+			planEditMode = true;
+			enablePlanEditModeTools();
+			updateStatus(ctx);
+			persistState();
+			ctx.ui.notify(
+				`Plan edit mode: writes allowed only inside "${PLANS_DIR}/". Describe your changes; use /discuss to exit.`,
+				"info",
+			);
 		} else if (choice === "Exit discuss mode") {
 			toggleDiscussMode(ctx);
 		}
-		// "Stay in discuss mode": nothing to do, keep discussing and regenerate later
 	});
 
 	// Restore state on session start/resume
@@ -327,11 +427,14 @@ en effectuant la validation indiquée à la fin de chaque étape.`,
 
 		if (discussModeEntry?.data) {
 			discussModeEnabled = discussModeEntry.data.enabled ?? discussModeEnabled;
+			planEditMode = discussModeEntry.data.planEditMode ?? planEditMode;
 			toolsBeforeDiscussMode = discussModeEntry.data.toolsBeforeDiscussMode ?? toolsBeforeDiscussMode;
 			planFilePath = discussModeEntry.data.planFilePath ?? planFilePath;
 		}
 
-		if (discussModeEnabled) {
+		if (planEditMode) {
+			enablePlanEditModeTools();
+		} else if (discussModeEnabled) {
 			enableDiscussModeTools();
 		}
 		updateStatus(ctx);
