@@ -4,16 +4,11 @@
 
 ## Ce qu'elle fait
 
-Intercepte chaque appel de l'outil `bash` avant son exécution et bloque ou demande confirmation si la commande semble dangereuse.
+Intercepte chaque appel de l'outil `bash` avant son exécution et bloque sans confirmation si la commande semble dangereuse — aucun prompt utilisateur, aucun mode CI spécial : le blocage est systématique.
 
-- Patterns détectés (regex, insensible à la casse) :
-  - `rm -rf` / `rm -r` / `rm --recursive`
-  - `sudo`
-  - `chmod 777` ou `chown 777`
+- Patterns détectés (regex, insensible à la casse), regroupés par catégorie : destruction de données (`rm -rf`, `dd of=/dev/...`, `mkfs`, `shred`, `wipefs`, `find -delete`, `truncate -s 0`), élévation de privilèges (`sudo`, `chmod/chown 777`, setuid/setgid, `setcap`, `visudo`/`sudoers`, `passwd`/`usermod`), système (`shutdown`/`reboot`, `kill -1`, fork bomb, `systemctl stop/disable/mask`, `swapoff`, `sysctl -w`, `crontab -r`), réseau (`curl|wget ... | sh`, flush/désactivation du pare-feu, shells netcat, écriture dans `authorized_keys`), git (`push --force`, `reset --hard`, `clean -f`, `branch -D`, `push --delete`), secrets et traces (clés SSH, `history -c`, `journalctl --vacuum`, suppression de logs, `LD_PRELOAD`), et paquets/système de fichiers (`apt/yum/dnf remove`, `mount`/`umount`, symlinks forcés vers des chemins système).
 - S'accroche à l'événement `tool_call` via `pi.on("tool_call", ...)`. Ignore tout appel dont `toolName !== "bash"`.
-- Si une commande matche un pattern dangereux :
-  - **Mode interactif** (`ctx.hasUI === true`) : ouvre un `ctx.ui.select(...)` avec les choix "Yes"/"No". Si l'utilisateur ne choisit pas "Yes", l'appel est bloqué (`{ block: true, reason: "Blocked by user" }`).
-  - **Mode non-interactif** (pas d'UI, ex. CI/scripté) : bloque automatiquement par défaut, sans jamais exécuter la commande (`reason: "Dangerous command blocked (no UI for confirmation)"`).
+- Si une commande matche un pattern dangereux, l'appel est bloqué immédiatement (`{ block: true, reason: "Dangerous command blocked by policy (<description>)" }`), qu'il y ait une UI ou non.
 - Si la commande n'est pas dangereuse, retourne `undefined` → laisse passer normalement.
 
 ## Comment l'utiliser
@@ -30,4 +25,4 @@ Aucune option externe : tout est codé en dur dans le tableau `dangerousPatterns
 
 ## Cas d'usage type
 
-Vous voulez un filet de sécurité basique contre les commandes destructrices accidentelles (l'agent qui tente un `rm -rf` mal ciblé) sans mettre en place un vrai sandboxing OS (voir `sandbox/`). En mode non-interactif (agent lancé en CI par exemple), ces commandes sont bloquées d'office plutôt que de risquer une exécution silencieuse.
+Vous voulez un filet de sécurité basique contre les commandes destructrices ou dangereuses (accidentelles ou induites par une injection de prompt) sans mettre en place un vrai sandboxing OS (voir `sandbox/`). Le filtrage par regex reste contournable (obfuscation, sous-shells, scripts écrits puis exécutés) : pour une isolation réelle, combiner avec `sandbox/` ou `gondolin/`.
