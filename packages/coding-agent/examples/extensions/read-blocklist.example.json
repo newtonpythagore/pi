@@ -1,0 +1,10 @@
+{
+  "blocked": [
+    ".env",
+    "*.pem",
+    "*.key",
+    "secrets/**",
+    "config/prod.key",
+    ".ssh/"
+  ]
+}
