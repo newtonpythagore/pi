@@ -21,7 +21,7 @@ cp permission-gate.ts ~/.pi/agent/extensions/
 | `permission-gate.ts` | Prompts for confirmation before dangerous bash commands (rm -rf, sudo, etc.) |
 | `project-trust.ts` | Demonstrates the `project_trust` event for user/global and CLI extensions |
 | `protected-paths.ts` | Blocks writes to protected paths (.env, .git/, node_modules/) |
-| `read-blocklist.ts` | Blocks *reads* of files/dirs listed in a per-project `.pi-read-blocklist.json` (glob patterns); covers `read`, `grep`, `find`, and `bash` |
+| `read-blocklist/` | Blocks *reads* of files/dirs listed in a per-project `.pi-read-blocklist.json`: blocks `read`/`grep`/`find` (symlinks resolved), filters search results, and syncs `denyRead` into the sandbox extension for OS-level bash enforcement |
 | `confirm-destructive.ts` | Confirms before destructive session actions (clear, switch, fork) |
 | `dirty-repo-guard.ts` | Prevents session changes with uncommitted git changes |
 | `sandbox/` | OS-level sandboxing using `@anthropic-ai/sandbox-runtime` with per-project config |

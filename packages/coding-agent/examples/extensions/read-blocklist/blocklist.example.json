@@ -6,5 +6,7 @@
     "secrets/**",
     "config/prod.key",
     ".ssh/"
-  ]
+  ],
+  "ignoreCase": false,
+  "syncSandbox": true
 }
