@@ -12,6 +12,15 @@ Intercepte chaque appel de l'outil `bash` avant son exécution et le classe en t
 
 - S'accroche à l'événement `tool_call` via `pi.on("tool_call", ...)`. Ignore tout appel dont `toolName !== "bash"`.
 
+### Explication des commandes pour utilisateurs non techniques
+
+Pour que l'utilisateur qui ne connaît pas les commandes Linux puisse décider en connaissance de cause :
+
+- L'extension ajoute une consigne au prompt système (via `before_agent_start`, en anglais) : toute commande modifiant le système de fichiers doit **commencer par une ligne de commentaire shell `# ...` en français simple, concise et claire** (une à deux lignes courtes), expliquant ce que fait la commande, ce qu'elle va concrètement créer/modifier/supprimer, et si c'est réversible. Bash ignore les commentaires : la commande s'exécute à l'identique.
+- Le dialogue de validation affichant la commande telle quelle, ce commentaire apparaît en tête de la boîte rouge — l'explication est lue au moment même de la décision.
+- **Le commentaire est exigé** : une commande de niveau 3 soumise sans commentaire explicatif est renvoyée à l'IA (message en anglais) lui demandant de resoumettre la même commande précédée du commentaire. Le prompt incite, le gate garantit.
+- Les lignes de commentaire sont retirées avant la classification : un commentaire mentionnant par exemple « sudo » ne déclenche pas le blocage dur, et une commande en lecture seule commentée reste en lecture seule.
+
 Ce découpage en trois niveaux empêche notamment le contournement classique du blocage de `rm -rf` par décomposition : `find ... -exec rm {} \;` puis `find ... -exec rmdir {} \;` supprimaient auparavant une arborescence entière sans déclencher aucun pattern ; ces commandes tombent désormais dans le niveau 3 et exigent une validation humaine.
 
 ## Comment l'utiliser

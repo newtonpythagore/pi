@@ -14,6 +14,12 @@
  *    the command with a reason telling the agent the user forbids the
  *    action entirely — it must not be attempted by any other means.
  *
+ * To help non-technical users decide, the agent is instructed (via a system
+ * prompt addition) to start every state-modifying command with a French
+ * shell comment (# ...) explaining concisely what it does; the dialog shows
+ * the command verbatim, comment included. A tier-3 command submitted without
+ * that comment is sent back to the agent to be resubmitted with one.
+ *
  * Note: regex filtering is a first line of defense, not a sandbox. Commands
  * can be obfuscated (subshells, base64, scripts written to disk). For real
  * isolation, see the sandbox/ and gondolin/ examples.
@@ -111,6 +117,21 @@ const readOnlyPatterns: RegExp[] = [
 // Redirections that don't write to a file
 const harmlessRedirects = /\d?>&\d|\d?>{1,2}\s*\/dev\/null/g;
 
+// Remove full-line shell comments so they don't affect classification
+// (e.g. a French explanation mentioning "sudo" must not trigger a hard block,
+// and a commented read-only command must stay read-only).
+export function stripCommentLines(command: string): string {
+	return command
+		.split("\n")
+		.filter((line) => !line.trimStart().startsWith("#"))
+		.join("\n");
+}
+
+// True when the command starts with a non-empty shell comment line
+export function hasExplanatoryComment(command: string): boolean {
+	return /^[ \t]*#[ \t]*\S/.test(command);
+}
+
 export function isReadOnly(command: string): boolean {
 	// Any remaining output redirection writes to a file
 	const stripped = command.replace(harmlessRedirects, "");
@@ -136,20 +157,55 @@ const REFUSAL_REASON =
 	"a script, a tool, or any workaround). Treat it as forbidden and continue the " +
 	"task without it.";
 
+// System prompt addition so the agent explains state-modifying commands
+const EXPLANATION_PROMPT = `
+
+## Bash command explanations (permission-gate)
+
+Bash commands that may modify the filesystem or system state require user
+confirmation before they run, and the user may not know Linux commands.
+For every such command (anything beyond pure read-only inspection), make the
+FIRST line of the command a shell comment (# ...) written in simple French
+for a non-technical user. The explanation must be concise and clear — one or
+two short lines — saying what the command does, what it will concretely
+create/modify/delete, and whether it is reversible. The confirmation dialog
+shows your command verbatim, so this comment is what the user reads to
+decide. Read-only commands do not need a comment.
+
+Example:
+# Supprime le fichier README.md du dossier pacman (irréversible)
+rm pacman/README.md`;
+
+// Sent to the agent when a tier-3 command arrives without an explanation
+const MISSING_COMMENT_REASON =
+	"This command requires user confirmation, and the user needs a plain-language " +
+	"explanation to decide. Resubmit the exact same command with a FIRST line that is " +
+	"a shell comment (# ...) explaining in simple French, concisely and clearly, what " +
+	"the command does and whether it is reversible. The comment is displayed to the " +
+	"user in the confirmation dialog.";
+
 export default function (pi: ExtensionAPI) {
+	pi.on("before_agent_start", async (event) => {
+		return { systemPrompt: event.systemPrompt + EXPLANATION_PROMPT };
+	});
+
 	pi.on("tool_call", async (event, ctx) => {
 		if (event.toolName !== "bash") return undefined;
 
 		const command = event.input.command as string;
+		// Classify without full-line comments: an explanation mentioning e.g.
+		// "sudo" must not trigger a block, and a commented read-only command
+		// must stay read-only.
+		const executable = stripCommentLines(command);
 
 		// Tier 1: hard block, no override
-		const match = dangerousPatterns.find(({ pattern }) => pattern.test(command));
+		const match = dangerousPatterns.find(({ pattern }) => pattern.test(executable));
 		if (match) {
 			return { block: true, reason: `Dangerous command blocked by policy (${match.description})` };
 		}
 
 		// Tier 2: read-only, run freely
-		if (isReadOnly(command)) return undefined;
+		if (isReadOnly(executable)) return undefined;
 
 		// Tier 3: anything else needs explicit user approval.
 		// "No" is listed first so it is preselected; dismissing the dialog
@@ -161,6 +217,11 @@ export default function (pi: ExtensionAPI) {
 					"User confirmation is required but no UI is available (non-interactive mode). " +
 					"Command blocked by default.",
 			};
+		}
+
+		// Require the French explanatory comment before showing the dialog
+		if (!hasExplanatoryComment(command)) {
+			return { block: true, reason: MISSING_COMMENT_REASON };
 		}
 
 		const prompt = ctx.ui.theme.fg(
